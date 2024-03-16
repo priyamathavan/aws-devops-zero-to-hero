@@ -1,37 +1,36 @@
 import boto3
 
 def lambda_handler(event, context):
+    
+    ec2 = boto3.setup_default_session(region_name='ap-south-1')
     ec2 = boto3.client('ec2')
-
+    
     # Get all EBS snapshots
-    response = ec2.describe_snapshots(OwnerIds=['self'])
-
-    # Get all active EC2 instance IDs
-    instances_response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
-    active_instance_ids = set()
-
-    for reservation in instances_response['Reservations']:
+    snapshots = ec2.describe_snapshots(OwnerIds=['self'])['Snapshots']
+    
+    # Get all active EC2 instance and volume IDs
+    instances = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running','terminated']}])['Reservations']
+    active_instance_volume_ids = set()
+    
+    # Get active instance and volume IDs
+    for reservation in instances:
         for instance in reservation['Instances']:
-            active_instance_ids.add(instance['InstanceId'])
-
-    # Iterate through each snapshot and delete if it's not attached to any volume or the volume is not attached to a running instance
-    for snapshot in response['Snapshots']:
+            for volume in instance['BlockDeviceMappings']:
+                active_instance_volume_ids.add(volume['Ebs']['VolumeId'])
+    
+    # Iterate through snapshots and delete if not attached to any active instance or volume
+    deleted_snapshots_count = 0
+    for snapshot in snapshots:
         snapshot_id = snapshot['SnapshotId']
         volume_id = snapshot.get('VolumeId')
-
-        if not volume_id:
-            # Delete the snapshot if it's not attached to any volume
+        
+        if not volume_id or volume_id not in active_instance_volume_ids:
+            # Delete the snapshot if it's not attached to any active instance or volume
             ec2.delete_snapshot(SnapshotId=snapshot_id)
-            print(f"Deleted EBS snapshot {snapshot_id} as it was not attached to any volume.")
-        else:
-            # Check if the volume still exists
-            try:
-                volume_response = ec2.describe_volumes(VolumeIds=[volume_id])
-                if not volume_response['Volumes'][0]['Attachments']:
-                    ec2.delete_snapshot(SnapshotId=snapshot_id)
-                    print(f"Deleted EBS snapshot {snapshot_id} as it was taken from a volume not attached to any running instance.")
-            except ec2.exceptions.ClientError as e:
-                if e.response['Error']['Code'] == 'InvalidVolume.NotFound':
-                    # The volume associated with the snapshot is not found (it might have been deleted)
-                    ec2.delete_snapshot(SnapshotId=snapshot_id)
-                    print(f"Deleted EBS snapshot {snapshot_id} as its associated volume was not found.")
+            print(f"Deleted EBS snapshot {snapshot_id} as it was not attached to any active instance or volume.")
+            deleted_snapshots_count += 1
+    return {
+    'statusCode': 200,
+    'body': f'Deleted {deleted_snapshots_count} unused EBS snapshots.'
+   }
+            
